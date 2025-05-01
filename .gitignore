@@ -1,0 +1,5 @@
+# Ignore database files
+*.db
+
+# Ignore GeoTIFF files
+*.tif
