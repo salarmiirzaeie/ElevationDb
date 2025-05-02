@@ -1,78 +1,77 @@
 import rasterio
 import sqlite3
 import os
-from tqdm import tqdm
 import math
+from tqdm import tqdm
+from rasterio.windows import from_bounds
 
-# --- CONFIG ---
-tif_file = 'elevation_data.tif'
-db_file = 'elevation.db'
-sample_step = 2  # use every pixel (can increase for downsampling)
-grid_size = 0.01  # اندازه گرید (تقریباً 1 کیلومتر)
+# -------------------- CONFIG --------------------
+tif_file = "elevation_data.tif"  # مسیر فایل GeoTIFF اصلی
+output_folder = "tiles"          # پوشه خروجی دیتابیس‌های tile
+tile_size = 0.1                  # اندازه هر tile بر حسب درجه (مثلاً 0.1 درجه ≈ 11km)
+min_points_per_tile = 1          # حداقل تعداد نقطه برای ایجاد یک tile
 
-def create_elevation_db(tif_file, db_file, sample_step=1, grid_size=0.01):
-    if os.path.exists(db_file):
-        os.remove(db_file)
+# فقط محدوده شمال غرب کشور
+min_lat, max_lat = 36.0, 39.5
+min_lon, max_lon = 44.0, 48.5
 
-    conn = sqlite3.connect(db_file)
+# -------------------- SETUP ---------------------
+os.makedirs(output_folder, exist_ok=True)
+
+# -------------------- PROCESS -------------------
+print("Reading GeoTIFF (Northwest only)...")
+with rasterio.open(tif_file) as src:
+    # محاسبه window فقط برای شمال غرب
+    window = from_bounds(min_lon, min_lat, max_lon, max_lat, transform=src.transform)
+    band = src.read(1, window=window)
+    transform = src.window_transform(window)
+    nodata = src.nodata
+
+    rows, cols = band.shape
+    tile_map = {}
+
+    print("Processing pixels in NW Iran...")
+    for row in tqdm(range(rows)):
+        for col in range(cols):
+            elevation = band[row, col]
+            if elevation == nodata:
+                continue
+
+            lon, lat = rasterio.transform.xy(transform, row, col)
+            tile_lat = math.floor(lat / tile_size)
+            tile_lon = math.floor(lon / tile_size)
+            tile_key = f"{tile_lat}_{tile_lon}"
+
+            if tile_key not in tile_map:
+                tile_map[tile_key] = []
+
+            tile_map[tile_key].append((lat, lon, float(elevation)))
+
+# -------------------- WRITE TILES ---------------
+print("Creating SQLite tiles...")
+for tile_key, points in tqdm(tile_map.items()):
+    if len(points) < min_points_per_tile:
+        continue
+
+    db_path = os.path.join(output_folder, f"{tile_key}.db")
+    conn = sqlite3.connect(db_path)
     cur = conn.cursor()
 
-    # ایجاد جدول بهینه‌شده بدون id و با گرید
     cur.execute('''
-        CREATE TABLE elevation_data (
+        CREATE TABLE IF NOT EXISTS elevation (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
             lat REAL,
             lon REAL,
-            elevation REAL,
-            grid_lat INTEGER,
-            grid_lon INTEGER
+            elevation REAL
         )
     ''')
 
-    # ایجاد ایندکس برای پاسخ سریع به کوئری‌ها
-    cur.execute('CREATE INDEX idx_grid ON elevation_data(grid_lat, grid_lon)')
+    cur.executemany('''
+        INSERT INTO elevation (lat, lon, elevation)
+        VALUES (?, ?, ?)
+    ''', points)
 
-    with rasterio.open(tif_file) as src:
-        band = src.read(1)
-        rows, cols = band.shape
-        transform = src.transform
-
-        batch_data = []
-        batch_size = 10000  # برای کاهش دفعات commit
-
-        for row in tqdm(range(0, rows, sample_step), desc="Processing"):
-            for col in range(0, cols, sample_step):
-                elevation = band[row, col]
-
-                # نادیده گرفتن مقادیر نامعتبر (مثلاً nodata)
-                if elevation == src.nodata:
-                    continue
-
-                lon, lat = rasterio.transform.xy(transform, row, col)
-
-                # محاسبه grid index
-                grid_lat = math.floor(lat / grid_size)
-                grid_lon = math.floor(lon / grid_size)
-
-                batch_data.append((lat, lon, float(elevation), grid_lat, grid_lon))
-
-                if len(batch_data) >= batch_size:
-                    cur.executemany('''
-                        INSERT INTO elevation_data (lat, lon, elevation, grid_lat, grid_lon)
-                        VALUES (?, ?, ?, ?, ?)
-                    ''', batch_data)
-                    conn.commit()
-                    batch_data = []
-
-        # وارد کردن باقی مانده‌ها
-        if batch_data:
-            cur.executemany('''
-                INSERT INTO elevation_data (lat, lon, elevation, grid_lat, grid_lon)
-                VALUES (?, ?, ?, ?, ?)
-            ''', batch_data)
-            conn.commit()
-
+    conn.commit()
     conn.close()
-    print(f"✅ Database created successfully: {db_file}")
 
-if __name__ == "__main__":
-    create_elevation_db(tif_file, db_file, sample_step, grid_size)
+print(f"✅ Done! Only northwest tiles are saved in '{output_folder}' folder.")
