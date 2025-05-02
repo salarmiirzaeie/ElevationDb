@@ -3,34 +3,32 @@ import sqlite3
 import os
 import math
 from tqdm import tqdm
-from rasterio.windows import from_bounds
+from rasterio.windows import Window
 
 # -------------------- CONFIG --------------------
-tif_file = "elevation_data.tif"  # مسیر فایل GeoTIFF اصلی
-output_folder = "tiles"          # پوشه خروجی دیتابیس‌های tile
-tile_size = 0.1                  # اندازه هر tile بر حسب درجه (مثلاً 0.1 درجه ≈ 11km)
-min_points_per_tile = 1          # حداقل تعداد نقطه برای ایجاد یک tile
+tif_file = "elevation_data.tif"
+output_folder = "tiles"
+tile_size = 0.1
+min_points_per_tile = 1
 
-# فقط محدوده شمال غرب کشور
-min_lat, max_lat = 36.0, 39.5
-min_lon, max_lon = 44.0, 48.5
+# محدوده شمال‌غرب که باید رد بشه
+exclude_min_lat, exclude_max_lat = 36.0, 39.5
+exclude_min_lon, exclude_max_lon = 44.0, 48.5
 
 # -------------------- SETUP ---------------------
 os.makedirs(output_folder, exist_ok=True)
 
 # -------------------- PROCESS -------------------
-print("Reading GeoTIFF (Northwest only)...")
+print("Reading GeoTIFF (excluding NW)...")
 with rasterio.open(tif_file) as src:
-    # محاسبه window فقط برای شمال غرب
-    window = from_bounds(min_lon, min_lat, max_lon, max_lat, transform=src.transform)
-    band = src.read(1, window=window)
-    transform = src.window_transform(window)
+    band = src.read(1)
+    transform = src.transform
     nodata = src.nodata
 
     rows, cols = band.shape
     tile_map = {}
 
-    print("Processing pixels in NW Iran...")
+    print("Processing all pixels (excluding NW)...")
     for row in tqdm(range(rows)):
         for col in range(cols):
             elevation = band[row, col]
@@ -38,6 +36,11 @@ with rasterio.open(tif_file) as src:
                 continue
 
             lon, lat = rasterio.transform.xy(transform, row, col)
+
+            # رد کردن پیکسل‌هایی که در محدوده NW قرار دارند
+            if (exclude_min_lat <= lat <= exclude_max_lat) and (exclude_min_lon <= lon <= exclude_max_lon):
+                continue
+
             tile_lat = math.floor(lat / tile_size)
             tile_lon = math.floor(lon / tile_size)
             tile_key = f"{tile_lat}_{tile_lon}"
@@ -48,12 +51,17 @@ with rasterio.open(tif_file) as src:
             tile_map[tile_key].append((lat, lon, float(elevation)))
 
 # -------------------- WRITE TILES ---------------
-print("Creating SQLite tiles...")
+print("Creating SQLite tiles (excluding NW)...")
 for tile_key, points in tqdm(tile_map.items()):
     if len(points) < min_points_per_tile:
         continue
 
     db_path = os.path.join(output_folder, f"{tile_key}.db")
+
+    # اگر قبلاً ساخته شده، رد کن
+    if os.path.exists(db_path):
+        continue
+
     conn = sqlite3.connect(db_path)
     cur = conn.cursor()
 
@@ -74,4 +82,4 @@ for tile_key, points in tqdm(tile_map.items()):
     conn.commit()
     conn.close()
 
-print(f"✅ Done! Only northwest tiles are saved in '{output_folder}' folder.")
+print("✅ Done! All non-NW tiles added to 'tiles' folder.")
